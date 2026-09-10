@@ -243,13 +243,13 @@ Example rejected response:
 
 The following screenshot shows a successful order request where enough inventory was available.
 
-![Confirmed Order](evidence/confirmed.png)
+![Confirmed Order](evidence/Confirm.png)
 
 ### Rejected Order
 
 The following screenshot shows a rejected order because the requested product had insufficient stock.
 
-![Rejected Order](evidence/rejected.png)
+![Rejected Order](evidence/Reject.png)
 
 ---
 
