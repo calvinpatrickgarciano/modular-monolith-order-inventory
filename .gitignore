@@ -1,0 +1,21 @@
+# Java
+backend/target/
+*.class
+
+# React
+frontend/node_modules/
+frontend/dist/
+
+# Environment variables / secrets
+.env
+.env.*
+application-local.properties
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
