@@ -2,12 +2,15 @@
 
 A modular monolith application built using Spring Boot, React, and Supabase PostgreSQL.
 
-The system contains two backend modules:
+The system contains three backend modules:
 
 - Order Module: `edu.cit.garciano.shop`
 - Inventory Module: `edu.cit.garciano.inventory`
+- Notification Module: `edu.cit.garciano.notification`
 
-The Order and Inventory modules communicate in-process inside one Spring Boot application. The React frontend communicates with the backend using HTTP REST, while Spring Boot connects to Supabase PostgreSQL using Spring Data JPA.
+The Order and Inventory modules communicate in-process inside one Spring Boot application. 
+The Notification module listens to Spring application events such as confirmed orders, rejected orders, cancelled orders, and low-stock alerts.
+The React frontend communicates with the backend using HTTP REST, while Spring Boot connects to Supabase PostgreSQL using Spring Data JPA.
 
 ---
 
