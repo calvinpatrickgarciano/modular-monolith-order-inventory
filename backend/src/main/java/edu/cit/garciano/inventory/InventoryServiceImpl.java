@@ -1,15 +1,29 @@
 package edu.cit.garciano.inventory;
 
+import edu.cit.garciano.inventory.event.LowStockEvent;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
 
 @Service
 class InventoryServiceImpl implements InventoryService {
 
     private final InventoryRepository inventoryRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
-    InventoryServiceImpl(InventoryRepository inventoryRepository) {
+    private final int lowStockThreshold;
+
+    InventoryServiceImpl(
+            InventoryRepository inventoryRepository,
+            ApplicationEventPublisher eventPublisher,
+            @Value("${inventory.low-stock-threshold:5}") int lowStockThreshold
+    ) {
         this.inventoryRepository = inventoryRepository;
+        this.eventPublisher = eventPublisher;
+        this.lowStockThreshold = lowStockThreshold;
     }
 
     @Override
@@ -18,6 +32,15 @@ class InventoryServiceImpl implements InventoryService {
         return inventoryRepository.findById(productId)
                 .map(this::toView)
                 .orElse(null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<InventoryView> getAllItems() {
+        return inventoryRepository.findAll()
+                .stream()
+                .map(this::toView)
+                .toList();
     }
 
     @Override
@@ -56,11 +79,46 @@ class InventoryServiceImpl implements InventoryService {
 
         inventoryRepository.save(item);
 
+        if (item.getStock() < lowStockThreshold) {
+            eventPublisher.publishEvent(
+                    new LowStockEvent(
+                            item.getProductId(),
+                            item.getName(),
+                            item.getStock()
+                    )
+            );
+        }
+
         return new ReservationResult(
                 true,
                 "Stock reserved successfully",
                 toView(item)
         );
+    }
+
+    @Override
+    @Transactional
+    public InventoryView restock(String productId, int quantity) {
+
+        if (quantity <= 0) {
+            throw new IllegalArgumentException(
+                    "Restock quantity must be greater than 0"
+            );
+        }
+
+        InventoryItem item = inventoryRepository
+                .findForUpdate(productId)
+                .orElseThrow(
+                        () -> new IllegalArgumentException(
+                                "Product not found: " + productId
+                        )
+                );
+
+        item.setStock(item.getStock() + quantity);
+
+        inventoryRepository.save(item);
+
+        return toView(item);
     }
 
     private InventoryView toView(InventoryItem item) {

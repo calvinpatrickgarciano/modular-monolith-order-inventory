@@ -4,17 +4,10 @@ import edu.cit.garciano.inventory.InventoryService;
 
 import java.util.List;
 
-public record PlaceOrderResponse(
+public record CancelOrderResponse(
         Long orderId,
         String status,
         String reason,
-        List<ItemOutcome> items,
         List<InventoryService.InventoryView> inventory
 ) {
-
-    public record ItemOutcome(
-            String productId,
-            String outcome
-    ) {
-    }
 }

@@ -1,7 +1,14 @@
 package edu.cit.garciano.shop;
 
+import java.util.List;
+
 public record PlaceOrderRequest(
-        String productId,
-        int quantity
+        List<LineItemRequest> items
 ) {
+
+    public record LineItemRequest(
+            String productId,
+            int quantity
+    ) {
+    }
 }

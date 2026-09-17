@@ -1,13 +1,10 @@
 package edu.cit.garciano.shop;
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
+import jakarta.persistence.*;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "orders")
@@ -18,44 +15,37 @@ public class Order {
     @Column(name = "order_id")
     private Long orderId;
 
-    @Column(name = "product_id")
-    private String productId;
-
-    private int quantity;
-
+    @Column(nullable = false)
     private String status;
 
     private String reason;
 
-    @Column(name = "created_at")
+    @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
+
+    @OneToMany(
+            mappedBy = "order",
+            cascade = CascadeType.ALL,
+            orphanRemoval = true
+    )
+    private List<OrderItem> items = new ArrayList<>();
 
     protected Order() {
     }
 
-    public Order(
-            String productId,
-            int quantity,
-            String status,
-            String reason
-    ) {
-        this.productId = productId;
-        this.quantity = quantity;
+    public Order(String status, String reason) {
         this.status = status;
         this.reason = reason;
         this.createdAt = OffsetDateTime.now();
     }
 
+    public void addItem(OrderItem item) {
+        items.add(item);
+        item.setOrder(this);
+    }
+
     public Long getOrderId() {
         return orderId;
-    }
-
-    public String getProductId() {
-        return productId;
-    }
-
-    public int getQuantity() {
-        return quantity;
     }
 
     public String getStatus() {
@@ -68,5 +58,17 @@ public class Order {
 
     public OffsetDateTime getCreatedAt() {
         return createdAt;
+    }
+
+    public List<OrderItem> getItems() {
+        return items;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public void setReason(String reason) {
+        this.reason = reason;
     }
 }
