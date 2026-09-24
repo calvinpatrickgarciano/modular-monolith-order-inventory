@@ -7,6 +7,7 @@ import edu.cit.garciano.shop.event.OrderRejectedEvent;
 
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
+import edu.cit.garciano.supplier.SupplierOrderDeliveredEvent;
 
 @Component
 class NotificationEventListener {
@@ -57,6 +58,22 @@ public void handleOrderCancelled(
                     + event.orderId()
                     + " was cancelled. "
                     + "Reserved items were returned to inventory.";
+
+    notificationRepository.save(
+            new Notification(message)
+    );
+}
+
+@EventListener
+public void handleSupplierDelivery(
+        SupplierOrderDeliveredEvent event
+) {
+    String message =
+            "Supplier delivery received for "
+                    + event.productId()
+                    + ". "
+                    + event.unitsDelivered()
+                    + " units were added to inventory.";
 
     notificationRepository.save(
             new Notification(message)
