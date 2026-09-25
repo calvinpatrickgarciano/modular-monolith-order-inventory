@@ -1,0 +1,13 @@
+# Lab 3 Reflection
+
+## 1. LegacySupply holds more than one order for BuyerRef "RO-null": PO-100184 (20:36:38) and PO-100185 (20:39:10). Reconstruct the sequence of events that produced the duplicate, and describe the change you made (or would make) so it cannot happen again.
+
+The duplicate happened because the BuyerRef was created using the supplier order ID before the order had been saved to the database. Since the ID had not been generated yet, both requests received the BuyerRef `RO-null`. Another low-stock event then created another supplier order, so LegacySupply accepted two separate purchase orders. I fixed this by saving the supplier order first, then using its generated ID to create a unique BuyerRef such as `RO-1`. I also added a check for an existing open reorder and a database unique index so the same product cannot have two open supplier reorders at the same time.
+
+## 2. PO-100069 (BuyerRef "MANUAL-RO-003") ended with StatusCode 90, which is not in the documentation. How did you work out what it means, and what does your system now do with the stock that will never arrive?
+
+I determined the meaning of StatusCode 90 by observing the behavior of PO-100069 instead of assuming that it was a normal documented status. The order stopped progressing and never reached StatusCode 40, while the LegacySupply verification information showed that the stock would never arrive, so I treated StatusCode 90 as a cancelled supplier order. My system does not publish a delivery event or add any units to inventory when an order is cancelled. The actual inventory quantity therefore remains unchanged, and the cancelled supplier order is treated as a terminal order rather than continuing to be tracked as a delivery.
+
+## 3. At 19:20:20 LegacySupply was down and rejected BuyerRef "MANUAL-RO-001". It was eventually placed as PO-100037 at 19:37:01. Where did that reorder live in the meantime, and what triggered the retry?
+
+`MANUAL-RO-001` was created during my manual contract-discovery testing, so during that specific test I kept the same purchase-order information and retried it manually after LegacySupply became available again. I reused the same request identity instead of creating a different purchase order, which allowed the request to be safely retried. In the final application, this situation is handled automatically by storing an unsuccessful supplier reorder in the `supplier_orders` table with a `PENDING` status. The scheduled retry process later calls `retryPendingOrders()`, which submits the same stored order again using its existing BuyerRef and X-Request-Id.

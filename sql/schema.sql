@@ -53,6 +53,32 @@ CREATE TABLE order_items (
         REFERENCES inventory(product_id)
 );
 
+CREATE TABLE supplier_orders (
+   id BIGSERIAL PRIMARY KEY,
+   product_id VARCHAR(20) NOT NULL,
+   buyer_ref VARCHAR(40) UNIQUE,
+   request_id VARCHAR(80) NOT NULL UNIQUE,
+   po_number VARCHAR(100),
+   cases INTEGER,
+   units INTEGER NOT NULL,
+   status VARCHAR(30) NOT NULL,
+   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+   CONSTRAINT fk_supplier_product
+       FOREIGN KEY (product_id)
+       REFERENCES inventory(product_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_open_reorder_product
+ON supplier_orders(product_id)
+WHERE status IN (
+   'PENDING',
+   'ACCEPTED',
+   'PICKING',
+   'SHIPPED',
+   'UNKNOWN'
+);
+
 
 -- =====================================================
 -- NOTIFICATIONS

@@ -6,6 +6,7 @@ public enum SupplierOrderStatus {
     PICKING,
     SHIPPED,
     DELIVERED,
+    CANCELLED,
     FAILED,
     UNKNOWN
 }
