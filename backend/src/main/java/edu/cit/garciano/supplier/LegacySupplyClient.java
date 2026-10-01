@@ -1,5 +1,7 @@
 package edu.cit.garciano.supplier;
 
+import edu.cit.garciano.runtime.AppInstanceIdentity;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -20,20 +22,35 @@ class LegacySupplyClient {
     private final String clientId;
     private final String apiKey;
 
+    /*
+     * LAB 4:
+     * The same UUID used for Tiangge must also be sent
+     * on every LegacySupply request.
+     */
+    private final AppInstanceIdentity appInstanceIdentity;
+
     private volatile String sessionToken;
 
     LegacySupplyClient(
             @Value("${supplier.base-url}") String baseUrl,
             @Value("${supplier.client-id}") String clientId,
-            @Value("${supplier.api-key}") String apiKey
+            @Value("${supplier.api-key}") String apiKey,
+            AppInstanceIdentity appInstanceIdentity
     ) {
+
         this.baseUrl = baseUrl;
         this.clientId = clientId;
         this.apiKey = apiKey;
 
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(3))
-                .build();
+        this.appInstanceIdentity =
+                appInstanceIdentity;
+
+        this.httpClient =
+                HttpClient.newBuilder()
+                        .connectTimeout(
+                                Duration.ofSeconds(3)
+                        )
+                        .build();
     }
 
     LegacyPurchaseOrderAck placeOrder(
@@ -46,7 +63,9 @@ class LegacySupplyClient {
         for (int attempt = 1; attempt <= 3; attempt++) {
 
             try {
-                String token = getSession();
+
+                String token =
+                        getSession();
 
                 String body =
                         LegacySupplyXml.purchaseOrderRequest(
@@ -63,7 +82,9 @@ class LegacySupplyClient {
                                                         + "/purchase-orders"
                                         )
                                 )
-                                .timeout(Duration.ofSeconds(3))
+                                .timeout(
+                                        Duration.ofSeconds(3)
+                                )
                                 .header(
                                         "Content-Type",
                                         "application/xml"
@@ -76,6 +97,17 @@ class LegacySupplyClient {
                                         "X-Request-Id",
                                         requestId
                                 )
+
+                                /*
+                                 * LAB 4:
+                                 * Identify this running copy
+                                 * of the Spring Boot application.
+                                 */
+                                .header(
+                                        "X-Client-Instance",
+                                        appInstanceIdentity.instanceId()
+                                )
+
                                 .POST(
                                         HttpRequest.BodyPublishers
                                                 .ofString(body)
@@ -92,6 +124,7 @@ class LegacySupplyClient {
                         response.statusCode() == 200
                                 || response.statusCode() == 201
                 ) {
+
                     return LegacySupplyXml
                             .purchaseOrderAck(
                                     response.body()
@@ -99,8 +132,10 @@ class LegacySupplyClient {
                 }
 
                 /*
-                 * A 401 means the session is no longer accepted.
-                 * Throw away the token so the next attempt signs in again.
+                 * Session expired.
+                 *
+                 * Throw away the existing token so
+                 * the next attempt signs in again.
                  */
                 if (response.statusCode() == 401) {
 
@@ -112,7 +147,7 @@ class LegacySupplyClient {
                 }
 
                 /*
-                 * 429 and 5xx errors are considered temporary.
+                 * Temporary errors.
                  */
                 if (
                         response.statusCode() == 429
@@ -137,9 +172,7 @@ class LegacySupplyClient {
             } catch (HttpTimeoutException exception) {
 
                 /*
-                 * Important:
-                 * We retry with the SAME requestId.
-                 * This prevents duplicate purchase orders.
+                 * Retry using the SAME request ID.
                  */
                 backoff(attempt);
 
@@ -170,7 +203,9 @@ class LegacySupplyClient {
         for (int attempt = 1; attempt <= 3; attempt++) {
 
             try {
-                String token = getSession();
+
+                String token =
+                        getSession();
 
                 HttpRequest request =
                         HttpRequest.newBuilder()
@@ -181,11 +216,23 @@ class LegacySupplyClient {
                                                         + poNumber
                                         )
                                 )
-                                .timeout(Duration.ofSeconds(3))
+                                .timeout(
+                                        Duration.ofSeconds(3)
+                                )
                                 .header(
                                         "X-LS-Session",
                                         token
                                 )
+
+                                /*
+                                 * LAB 4:
+                                 * Same live application instance ID.
+                                 */
+                                .header(
+                                        "X-Client-Instance",
+                                        appInstanceIdentity.instanceId()
+                                )
+
                                 .GET()
                                 .build();
 
@@ -256,6 +303,9 @@ class LegacySupplyClient {
         );
     }
 
+    /*
+     * Obtain or reuse the LegacySupply session.
+     */
     private synchronized String getSession() {
 
         if (sessionToken != null) {
@@ -265,6 +315,7 @@ class LegacySupplyClient {
         for (int attempt = 1; attempt <= 3; attempt++) {
 
             try {
+
                 String body =
                         LegacySupplyXml.authRequest(
                                 clientId,
@@ -279,11 +330,25 @@ class LegacySupplyClient {
                                                         + "/auth/token"
                                         )
                                 )
-                                .timeout(Duration.ofSeconds(3))
+                                .timeout(
+                                        Duration.ofSeconds(3)
+                                )
                                 .header(
                                         "Content-Type",
                                         "application/xml"
                                 )
+
+                                /*
+                                 * LAB 4:
+                                 * Authentication is also a
+                                 * LegacySupply request, therefore
+                                 * it receives the instance ID.
+                                 */
+                                .header(
+                                        "X-Client-Instance",
+                                        appInstanceIdentity.instanceId()
+                                )
+
                                 .POST(
                                         HttpRequest.BodyPublishers
                                                 .ofString(body)
@@ -358,12 +423,16 @@ class LegacySupplyClient {
 
         long delay =
                 switch (attempt) {
+
                     case 1 -> 250;
+
                     case 2 -> 500;
+
                     default -> 1000;
                 };
 
         try {
+
             Thread.sleep(delay);
 
         } catch (InterruptedException exception) {

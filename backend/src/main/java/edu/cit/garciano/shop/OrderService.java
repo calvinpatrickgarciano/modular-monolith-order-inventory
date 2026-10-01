@@ -1,7 +1,7 @@
 package edu.cit.garciano.shop;
 
-import edu.cit.garciano.shop.event.OrderCancelledEvent;
 import edu.cit.garciano.inventory.InventoryService;
+import edu.cit.garciano.shop.event.OrderCancelledEvent;
 import edu.cit.garciano.shop.event.OrderPlacedEvent;
 import edu.cit.garciano.shop.event.OrderRejectedEvent;
 
@@ -31,10 +31,20 @@ public class OrderService {
         this.eventPublisher = eventPublisher;
     }
 
-    @Transactional
-    public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
+    // =========================================================
+    // NORMAL ORDER
+    // =========================================================
 
-        if (request.items() == null || request.items().isEmpty()) {
+    @Transactional
+    public PlaceOrderResponse placeOrder(
+            PlaceOrderRequest request
+    ) {
+
+        if (
+                request.items() == null
+                        || request.items().isEmpty()
+        ) {
+
             return createRejectedOrder(
                     request,
                     "Order must contain at least one item",
@@ -43,21 +53,25 @@ public class OrderService {
         }
 
         /*
-         * Combine quantities for validation.
+         * Combine duplicate product quantities first.
          *
          * Example:
+         *
          * P100 x 10
          * P100 x 20
          *
-         * We must validate against 30 total,
-         * not check 10 and 20 separately.
+         * Validate against 30 total.
          */
         Map<String, Integer> requestedQuantities =
                 new LinkedHashMap<>();
 
-        for (PlaceOrderRequest.LineItemRequest item : request.items()) {
+        for (
+                PlaceOrderRequest.LineItemRequest item :
+                request.items()
+        ) {
 
             if (item.quantity() <= 0) {
+
                 return createRejectedOrder(
                         request,
                         "Quantity must be greater than 0 for "
@@ -75,29 +89,43 @@ public class OrderService {
 
         /*
          * STEP 1:
-         * Validate EVERYTHING before reserving anything.
+         * Validate the ENTIRE order before reserving.
          */
-        for (Map.Entry<String, Integer> entry
-                : requestedQuantities.entrySet()) {
+        for (
+                Map.Entry<String, Integer> entry :
+                requestedQuantities.entrySet()
+        ) {
 
-            String productId = entry.getKey();
-            int requestedQuantity = entry.getValue();
+            String productId =
+                    entry.getKey();
+
+            int requestedQuantity =
+                    entry.getValue();
 
             InventoryService.InventoryView inventory =
-                    inventoryService.getItem(productId);
+                    inventoryService.getItem(
+                            productId
+                    );
 
             if (inventory == null) {
+
                 return createRejectedOrder(
                         request,
-                        "Product not found: " + productId,
+                        "Product not found: "
+                                + productId,
                         productId
                 );
             }
 
-            if (requestedQuantity > inventory.stock()) {
+            if (
+                    requestedQuantity
+                            > inventory.stock()
+            ) {
+
                 return createRejectedOrder(
                         request,
-                        "Insufficient stock for " + productId
+                        "Insufficient stock for "
+                                + productId
                                 + ". Available: "
                                 + inventory.stock(),
                         productId
@@ -107,13 +135,17 @@ public class OrderService {
 
         /*
          * STEP 2:
-         * All products passed validation.
-         * Now reserve every item.
+         * Everything passed validation.
+         * Reserve every item.
          */
-        List<PlaceOrderResponse.ItemOutcome> outcomes =
+        List<PlaceOrderResponse.ItemOutcome>
+                outcomes =
                 new ArrayList<>();
 
-        for (PlaceOrderRequest.LineItemRequest item : request.items()) {
+        for (
+                PlaceOrderRequest.LineItemRequest item :
+                request.items()
+        ) {
 
             InventoryService.ReservationResult result =
                     inventoryService.reserve(
@@ -122,13 +154,13 @@ public class OrderService {
                     );
 
             /*
-             * This should normally never fail because we
-             * validated everything first.
+             * Normally this should never fail because
+             * everything was validated first.
              *
-             * Throwing an exception here causes the entire
-             * @Transactional operation to roll back.
+             * Throwing here rolls back the whole transaction.
              */
             if (!result.success()) {
+
                 throw new IllegalStateException(
                         "Reservation failed after validation for "
                                 + item.productId()
@@ -145,14 +177,19 @@ public class OrderService {
 
         /*
          * STEP 3:
-         * Save the confirmed order and its line items.
+         * Save the confirmed order.
          */
-        Order order = new Order(
-                "CONFIRMED",
-                "All items reserved successfully"
-        );
+        Order order =
+                new Order(
+                        "CONFIRMED",
+                        "All items reserved successfully"
+                );
 
-        for (PlaceOrderRequest.LineItemRequest item : request.items()) {
+        for (
+                PlaceOrderRequest.LineItemRequest item :
+                request.items()
+        ) {
+
             order.addItem(
                     new OrderItem(
                             item.productId(),
@@ -161,16 +198,19 @@ public class OrderService {
             );
         }
 
-        Order savedOrder = orderRepository.save(order);
+        Order savedOrder =
+                orderRepository.save(
+                        order
+                );
 
         /*
          * STEP 4:
-         * Publish event.
-         *
-         * OrderService does NOT call Notification directly.
+         * Publish domain event.
          */
         eventPublisher.publishEvent(
-                new OrderPlacedEvent(savedOrder.getOrderId())
+                new OrderPlacedEvent(
+                        savedOrder.getOrderId()
+                )
         );
 
         return new PlaceOrderResponse(
@@ -182,82 +222,503 @@ public class OrderService {
         );
     }
 
-@Transactional(readOnly = true)
-public List<OrderHistoryResponse> getOrders() {
+    // =========================================================
+    // ORDER HISTORY
+    // =========================================================
 
-    return orderRepository.findAll()
-            .stream()
-            .map(order -> new OrderHistoryResponse(
+    @Transactional(readOnly = true)
+    public List<OrderHistoryResponse> getOrders() {
+
+        return orderRepository
+                .findAll()
+                .stream()
+                .map(
+                        order ->
+                                new OrderHistoryResponse(
+                                        order.getOrderId(),
+                                        order.getStatus(),
+                                        order.getReason(),
+                                        order.getCreatedAt(),
+
+                                        order.getItems()
+                                                .stream()
+                                                .map(
+                                                        item ->
+                                                                new OrderHistoryResponse
+                                                                        .OrderItemView(
+                                                                        item.getProductId(),
+                                                                        item.getQuantity()
+                                                                )
+                                                )
+                                                .toList()
+                                )
+                )
+                .toList();
+    }
+
+    // =========================================================
+    // NORMAL ORDER CANCELLATION
+    // =========================================================
+
+    @Transactional
+    public CancelOrderResponse cancelOrder(
+            Long orderId
+    ) {
+
+        Order order =
+                orderRepository.findById(
+                        orderId
+                )
+                        .orElseThrow(
+                                () ->
+                                        new OrderNotFoundException(
+                                                "Order "
+                                                        + orderId
+                                                        + " does not exist"
+                                        )
+                        );
+
+        if (
+                "CANCELLED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            throw new OrderConflictException(
+                    "Order "
+                            + orderId
+                            + " is already cancelled"
+            );
+        }
+
+        if (
+                !"CONFIRMED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            throw new OrderConflictException(
+                    "Only confirmed orders can be cancelled"
+            );
+        }
+
+        /*
+         * Restore every reserved item.
+         */
+        for (
+                OrderItem item :
+                order.getItems()
+        ) {
+
+            inventoryService.restock(
+                    item.getProductId(),
+                    item.getQuantity()
+            );
+        }
+
+        order.setStatus(
+                "CANCELLED"
+        );
+
+        order.setReason(
+                "Order cancelled and inventory restocked"
+        );
+
+        orderRepository.save(
+                order
+        );
+
+        eventPublisher.publishEvent(
+                new OrderCancelledEvent(
+                        order.getOrderId()
+                )
+        );
+
+        return new CancelOrderResponse(
+                order.getOrderId(),
+                order.getStatus(),
+                order.getReason(),
+                inventoryService.getAllItems()
+        );
+    }
+
+    // =========================================================
+    // LAB 4 - CREATE BACKORDER
+    // =========================================================
+
+    @Transactional
+    public PlaceOrderResponse placeBackorder(
+            PlaceOrderRequest request,
+            String reason
+    ) {
+
+        if (
+                request.items() == null
+                        || request.items().isEmpty()
+        ) {
+
+            throw new IllegalArgumentException(
+                    "Backorder must contain at least one item"
+            );
+        }
+
+        /*
+         * Validate all requested products.
+         *
+         * A backorder does NOT reserve stock yet.
+         */
+        for (
+                PlaceOrderRequest.LineItemRequest item :
+                request.items()
+        ) {
+
+            if (item.quantity() <= 0) {
+
+                throw new IllegalArgumentException(
+                        "Quantity must be greater than 0 for "
+                                + item.productId()
+                );
+            }
+
+            InventoryService.InventoryView inventory =
+                    inventoryService.getItem(
+                            item.productId()
+                    );
+
+            if (inventory == null) {
+
+                throw new IllegalArgumentException(
+                        "Product not found: "
+                                + item.productId()
+                );
+            }
+        }
+
+        Order order =
+                new Order(
+                        "BACKORDERED",
+                        reason
+                );
+
+        for (
+                PlaceOrderRequest.LineItemRequest item :
+                request.items()
+        ) {
+
+            order.addItem(
+                    new OrderItem(
+                            item.productId(),
+                            item.quantity()
+                    )
+            );
+        }
+
+        Order savedOrder =
+                orderRepository.save(
+                        order
+                );
+
+        List<PlaceOrderResponse.ItemOutcome>
+                outcomes =
+                request.items()
+                        .stream()
+                        .map(
+                                item ->
+                                        new PlaceOrderResponse.ItemOutcome(
+                                                item.productId(),
+                                                "WAITING_FOR_STOCK"
+                                        )
+                        )
+                        .toList();
+
+        return new PlaceOrderResponse(
+                savedOrder.getOrderId(),
+                "BACKORDERED",
+                reason,
+                outcomes,
+                inventoryService.getAllItems()
+        );
+    }
+
+    // =========================================================
+    // LAB 4 - RESOLVE BACKORDER
+    // =========================================================
+
+    @Transactional
+    public PlaceOrderResponse resolveBackorder(
+            Long orderId
+    ) {
+
+        Order order =
+                orderRepository.findById(
+                        orderId
+                )
+                        .orElseThrow(
+                                () ->
+                                        new OrderNotFoundException(
+                                                "Order "
+                                                        + orderId
+                                                        + " does not exist"
+                                        )
+                        );
+
+        /*
+         * Already resolved successfully.
+         */
+        if (
+                "CONFIRMED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            return new PlaceOrderResponse(
                     order.getOrderId(),
                     order.getStatus(),
                     order.getReason(),
-                    order.getCreatedAt(),
+
                     order.getItems()
                             .stream()
-                            .map(item ->
-                                    new OrderHistoryResponse.OrderItemView(
-                                            item.getProductId(),
-                                            item.getQuantity()
-                                    )
+                            .map(
+                                    item ->
+                                            new PlaceOrderResponse.ItemOutcome(
+                                                    item.getProductId(),
+                                                    "RESERVED"
+                                            )
                             )
-                            .toList()
-            ))
-            .toList();
-}
+                            .toList(),
 
-@Transactional
-public CancelOrderResponse cancelOrder(Long orderId) {
-
-    Order order = orderRepository.findById(orderId)
-            .orElseThrow(() ->
-                    new OrderNotFoundException(
-                            "Order " + orderId + " does not exist"
-                    )
+                    inventoryService.getAllItems()
             );
+        }
 
-    if ("CANCELLED".equals(order.getStatus())) {
-        throw new OrderConflictException(
-                "Order " + orderId + " is already cancelled"
+        if (
+                !"BACKORDERED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            throw new OrderConflictException(
+                    "Order "
+                            + orderId
+                            + " is not backordered"
+            );
+        }
+
+        /*
+         * Combine duplicate product lines.
+         */
+        Map<String, Integer> requestedQuantities =
+                new LinkedHashMap<>();
+
+        for (
+                OrderItem item :
+                order.getItems()
+        ) {
+
+            requestedQuantities.merge(
+                    item.getProductId(),
+                    item.getQuantity(),
+                    Integer::sum
+            );
+        }
+
+        /*
+         * Validate the whole backorder first.
+         *
+         * Do not reserve anything until every
+         * product has enough stock.
+         */
+        for (
+                Map.Entry<String, Integer> entry :
+                requestedQuantities.entrySet()
+        ) {
+
+            InventoryService.InventoryView inventory =
+                    inventoryService.getItem(
+                            entry.getKey()
+                    );
+
+            if (
+                    inventory == null
+                            ||
+                    inventory.stock()
+                            < entry.getValue()
+            ) {
+
+                return new PlaceOrderResponse(
+                        order.getOrderId(),
+                        "BACKORDERED",
+                        "Still waiting for enough inventory",
+
+                        order.getItems()
+                                .stream()
+                                .map(
+                                        item ->
+                                                new PlaceOrderResponse
+                                                        .ItemOutcome(
+                                                        item.getProductId(),
+                                                        "WAITING_FOR_STOCK"
+                                                )
+                                )
+                                .toList(),
+
+                        inventoryService.getAllItems()
+                );
+            }
+        }
+
+        /*
+         * Everything is now available.
+         *
+         * Reserve all required stock.
+         */
+        for (
+                Map.Entry<String, Integer> entry :
+                requestedQuantities.entrySet()
+        ) {
+
+            InventoryService.ReservationResult result =
+                    inventoryService.reserve(
+                            entry.getKey(),
+                            entry.getValue()
+                    );
+
+            if (!result.success()) {
+
+                /*
+                 * Causes the entire transaction to roll back.
+                 */
+                throw new IllegalStateException(
+                        "Backorder reservation failed for "
+                                + entry.getKey()
+                );
+            }
+        }
+
+        order.setStatus(
+                "CONFIRMED"
+        );
+
+        order.setReason(
+                "Backorder filled after supplier delivery"
+        );
+
+        orderRepository.save(
+                order
+        );
+
+        eventPublisher.publishEvent(
+                new OrderPlacedEvent(
+                        order.getOrderId()
+                )
+        );
+
+        return new PlaceOrderResponse(
+                order.getOrderId(),
+                "CONFIRMED",
+                order.getReason(),
+
+                order.getItems()
+                        .stream()
+                        .map(
+                                item ->
+                                        new PlaceOrderResponse.ItemOutcome(
+                                                item.getProductId(),
+                                                "RESERVED"
+                                        )
+                        )
+                        .toList(),
+
+                inventoryService.getAllItems()
         );
     }
 
-    if (!"CONFIRMED".equals(order.getStatus())) {
-        throw new OrderConflictException(
-                "Only confirmed orders can be cancelled"
+    // =========================================================
+    // LAB 4 - CANCEL BACKORDER
+    // =========================================================
+
+    @Transactional
+    public CancelOrderResponse cancelBackorder(
+            Long orderId,
+            String reason
+    ) {
+
+        Order order =
+                orderRepository.findById(
+                        orderId
+                )
+                        .orElseThrow(
+                                () ->
+                                        new OrderNotFoundException(
+                                                "Order "
+                                                        + orderId
+                                                        + " does not exist"
+                                        )
+                        );
+
+        /*
+         * Safe if retried after a restart.
+         */
+        if (
+                "CANCELLED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            return new CancelOrderResponse(
+                    order.getOrderId(),
+                    order.getStatus(),
+                    order.getReason(),
+                    inventoryService.getAllItems()
+            );
+        }
+
+        if (
+                !"BACKORDERED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            throw new OrderConflictException(
+                    "Only a backordered order can be cancelled this way"
+            );
+        }
+
+        /*
+         * IMPORTANT:
+         *
+         * Backorders never reserved stock.
+         * Therefore there is nothing to restock.
+         */
+        order.setStatus(
+                "CANCELLED"
+        );
+
+        order.setReason(
+                reason
+        );
+
+        orderRepository.save(
+                order
+        );
+
+        eventPublisher.publishEvent(
+                new OrderCancelledEvent(
+                        order.getOrderId()
+                )
+        );
+
+        return new CancelOrderResponse(
+                order.getOrderId(),
+                order.getStatus(),
+                order.getReason(),
+                inventoryService.getAllItems()
         );
     }
 
-    /*
-     * Reverse the original module-to-module integration.
-     *
-     * Order → Inventory
-     * through InventoryService only.
-     */
-    for (OrderItem item : order.getItems()) {
-
-        inventoryService.restock(
-                item.getProductId(),
-                item.getQuantity()
-        );
-    }
-
-    order.setStatus("CANCELLED");
-    order.setReason("Order cancelled and inventory restocked");
-
-    orderRepository.save(order);
-
-eventPublisher.publishEvent(
-        new OrderCancelledEvent(order.getOrderId())
-);
-
-    return new CancelOrderResponse(
-            order.getOrderId(),
-            order.getStatus(),
-            order.getReason(),
-            inventoryService.getAllItems()
-    );
-}
-
+    // =========================================================
+    // REJECTED ORDER HELPER
+    // =========================================================
 
     private PlaceOrderResponse createRejectedOrder(
             PlaceOrderRequest request,
@@ -265,21 +726,32 @@ eventPublisher.publishEvent(
             String failedProductId
     ) {
 
-        Order order = new Order(
-                "REJECTED",
-                reason
-        );
+        Order order =
+                new Order(
+                        "REJECTED",
+                        reason
+                );
 
         /*
-         * Only store valid known products as order items.
-         * This prevents FK/quantity constraint problems
-         * for malformed requests.
+         * Store only valid known products.
+         *
+         * This avoids FK problems if the request
+         * contains an invalid product ID.
          */
         if (request.items() != null) {
-            for (PlaceOrderRequest.LineItemRequest item : request.items()) {
 
-                if (item.quantity() > 0
-                        && inventoryService.getItem(item.productId()) != null) {
+            for (
+                    PlaceOrderRequest.LineItemRequest item :
+                    request.items()
+            ) {
+
+                if (
+                        item.quantity() > 0
+                                &&
+                        inventoryService.getItem(
+                                item.productId()
+                        ) != null
+                ) {
 
                     order.addItem(
                             new OrderItem(
@@ -291,21 +763,37 @@ eventPublisher.publishEvent(
             }
         }
 
-        Order savedOrder = orderRepository.save(order);
+        Order savedOrder =
+                orderRepository.save(
+                        order
+                );
 
-        List<PlaceOrderResponse.ItemOutcome> outcomes =
+        List<PlaceOrderResponse.ItemOutcome>
+                outcomes =
                 new ArrayList<>();
 
         if (request.items() != null) {
 
-            for (PlaceOrderRequest.LineItemRequest item : request.items()) {
+            for (
+                    PlaceOrderRequest.LineItemRequest item :
+                    request.items()
+            ) {
 
                 String outcome;
 
-                if (item.productId().equals(failedProductId)) {
-                    outcome = "FAILED";
+                if (
+                        item.productId().equals(
+                                failedProductId
+                        )
+                ) {
+
+                    outcome =
+                            "FAILED";
+
                 } else {
-                    outcome = "NOT_RESERVED";
+
+                    outcome =
+                            "NOT_RESERVED";
                 }
 
                 outcomes.add(

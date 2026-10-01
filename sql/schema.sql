@@ -90,6 +90,66 @@ CREATE TABLE notifications (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS channel_feed_state (
+    id SMALLINT PRIMARY KEY,
+    last_cursor BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT channel_feed_state_singleton
+        CHECK (id = 1)
+);
+
+INSERT INTO channel_feed_state (
+    id,
+    last_cursor
+)
+VALUES (
+    1,
+    0
+)
+ON CONFLICT (id) DO NOTHING;
+
+
+CREATE TABLE IF NOT EXISTS channel_processed_events (
+    event_id VARCHAR(100) PRIMARY KEY,
+    seq BIGINT NOT NULL,
+    event_type VARCHAR(40) NOT NULL,
+    tiangge_order_id VARCHAR(40) NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS channel_orders (
+    tiangge_order_id VARCHAR(40) PRIMARY KEY,
+    shop_order_id BIGINT,
+    decision VARCHAR(20),
+    decision_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(30) NOT NULL DEFAULT 'NEW',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS channel_stock_updates (
+    id BIGSERIAL PRIMARY KEY,
+    seller_sku VARCHAR(40) NOT NULL,
+    available INTEGER NOT NULL,
+    blocked_by_order_id VARCHAR(40),
+    sent BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT channel_stock_nonnegative
+        CHECK (available >= 0)
+);
+
+
+CREATE INDEX IF NOT EXISTS idx_channel_events_seq
+ON channel_processed_events(seq);
+
+
+CREATE INDEX IF NOT EXISTS idx_channel_stock_pending
+ON channel_stock_updates(sent, blocked_by_order_id);
+
 
 -- =====================================================
 -- SEED INVENTORY
@@ -100,3 +160,66 @@ VALUES
 ('P100', 'Wireless Mouse', 25),
 ('P200', 'Mechanical Keyboard', 10),
 ('P300', 'USB-C Hub', 0);
+
+CREATE TABLE IF NOT EXISTS channel_feed_state (
+    id SMALLINT PRIMARY KEY,
+    last_cursor BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT channel_feed_state_singleton
+        CHECK (id = 1)
+);
+
+INSERT INTO channel_feed_state (
+    id,
+    last_cursor
+)
+VALUES (
+    1,
+    0
+)
+ON CONFLICT (id) DO NOTHING;
+
+
+CREATE TABLE IF NOT EXISTS channel_processed_events (
+    event_id VARCHAR(100) PRIMARY KEY,
+    seq BIGINT NOT NULL,
+    event_type VARCHAR(40) NOT NULL,
+    tiangge_order_id VARCHAR(40) NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS channel_orders (
+    tiangge_order_id VARCHAR(40) PRIMARY KEY,
+    shop_order_id BIGINT,
+    decision VARCHAR(20),
+    decision_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(30) NOT NULL DEFAULT 'NEW',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS channel_stock_updates (
+    id BIGSERIAL PRIMARY KEY,
+    seller_sku VARCHAR(40) NOT NULL,
+    available INTEGER NOT NULL,
+    blocked_by_order_id VARCHAR(40),
+    sent BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT channel_stock_nonnegative
+        CHECK (available >= 0)
+);
+
+
+CREATE INDEX IF NOT EXISTS idx_channel_events_seq
+ON channel_processed_events(seq);
+
+
+CREATE INDEX IF NOT EXISTS idx_channel_stock_pending
+ON channel_stock_updates(
+    sent,
+    blocked_by_order_id
+);

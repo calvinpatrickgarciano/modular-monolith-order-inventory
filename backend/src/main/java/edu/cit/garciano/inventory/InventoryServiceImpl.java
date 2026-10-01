@@ -1,6 +1,8 @@
 package edu.cit.garciano.inventory;
 
+import edu.cit.garciano.inventory.event.InventoryChangedEvent;
 import edu.cit.garciano.inventory.event.LowStockEvent;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -19,17 +21,28 @@ class InventoryServiceImpl implements InventoryService {
     InventoryServiceImpl(
             InventoryRepository inventoryRepository,
             ApplicationEventPublisher eventPublisher,
-            @Value("${inventory.low-stock-threshold:5}") int lowStockThreshold
+            @Value("${inventory.low-stock-threshold:5}")
+            int lowStockThreshold
     ) {
-        this.inventoryRepository = inventoryRepository;
-        this.eventPublisher = eventPublisher;
-        this.lowStockThreshold = lowStockThreshold;
+
+        this.inventoryRepository =
+                inventoryRepository;
+
+        this.eventPublisher =
+                eventPublisher;
+
+        this.lowStockThreshold =
+                lowStockThreshold;
     }
 
     @Override
     @Transactional(readOnly = true)
-    public InventoryView getItem(String productId) {
-        return inventoryRepository.findById(productId)
+    public InventoryView getItem(
+            String productId
+    ) {
+
+        return inventoryRepository
+                .findById(productId)
                 .map(this::toView)
                 .orElse(null);
     }
@@ -37,7 +50,9 @@ class InventoryServiceImpl implements InventoryService {
     @Override
     @Transactional(readOnly = true)
     public List<InventoryView> getAllItems() {
-        return inventoryRepository.findAll()
+
+        return inventoryRepository
+                .findAll()
                 .stream()
                 .map(this::toView)
                 .toList();
@@ -45,9 +60,13 @@ class InventoryServiceImpl implements InventoryService {
 
     @Override
     @Transactional
-    public ReservationResult reserve(String productId, int quantity) {
+    public ReservationResult reserve(
+            String productId,
+            int quantity
+    ) {
 
         if (quantity <= 0) {
+
             return new ReservationResult(
                     false,
                     "Quantity must be greater than 0",
@@ -55,11 +74,13 @@ class InventoryServiceImpl implements InventoryService {
             );
         }
 
-        InventoryItem item = inventoryRepository
-                .findForUpdate(productId)
-                .orElse(null);
+        InventoryItem item =
+                inventoryRepository
+                        .findForUpdate(productId)
+                        .orElse(null);
 
         if (item == null) {
+
             return new ReservationResult(
                     false,
                     "Product not found",
@@ -68,18 +89,44 @@ class InventoryServiceImpl implements InventoryService {
         }
 
         if (quantity > item.getStock()) {
+
             return new ReservationResult(
                     false,
-                    "Insufficient stock. Available stock: " + item.getStock(),
+                    "Insufficient stock. Available stock: "
+                            + item.getStock(),
                     toView(item)
             );
         }
 
-        item.setStock(item.getStock() - quantity);
+        item.setStock(
+                item.getStock() - quantity
+        );
 
         inventoryRepository.save(item);
 
-        if (item.getStock() < lowStockThreshold) {
+        /*
+         * TASK 3:
+         *
+         * Tell the rest of the application that
+         * available inventory changed.
+         *
+         * Inventory does NOT know Tiangge exists.
+         */
+        eventPublisher.publishEvent(
+                new InventoryChangedEvent(
+                        item.getProductId(),
+                        item.getStock()
+                )
+        );
+
+        /*
+         * Existing Lab 3 automatic reorder event.
+         */
+        if (
+                item.getStock()
+                        < lowStockThreshold
+        ) {
+
             eventPublisher.publishEvent(
                     new LowStockEvent(
                             item.getProductId(),
@@ -98,30 +145,58 @@ class InventoryServiceImpl implements InventoryService {
 
     @Override
     @Transactional
-    public InventoryView restock(String productId, int quantity) {
+    public InventoryView restock(
+            String productId,
+            int quantity
+    ) {
 
         if (quantity <= 0) {
+
             throw new IllegalArgumentException(
                     "Restock quantity must be greater than 0"
             );
         }
 
-        InventoryItem item = inventoryRepository
-                .findForUpdate(productId)
-                .orElseThrow(
-                        () -> new IllegalArgumentException(
-                                "Product not found: " + productId
-                        )
-                );
+        InventoryItem item =
+                inventoryRepository
+                        .findForUpdate(productId)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalArgumentException(
+                                                "Product not found: "
+                                                        + productId
+                                        )
+                        );
 
-        item.setStock(item.getStock() + quantity);
+        item.setStock(
+                item.getStock() + quantity
+        );
 
         inventoryRepository.save(item);
+
+        /*
+         * TASK 3:
+         *
+         * This catches ALL restocks:
+         *
+         * - React UI cancellations
+         * - Tiangge cancellations later
+         * - LegacySupply deliveries
+         */
+        eventPublisher.publishEvent(
+                new InventoryChangedEvent(
+                        item.getProductId(),
+                        item.getStock()
+                )
+        );
 
         return toView(item);
     }
 
-    private InventoryView toView(InventoryItem item) {
+    private InventoryView toView(
+            InventoryItem item
+    ) {
+
         return new InventoryView(
                 item.getProductId(),
                 item.getName(),
