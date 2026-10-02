@@ -7,27 +7,36 @@ import org.springframework.stereotype.Component;
 class TianggeFeedPoller {
 
     private final TianggeFeedProcessor feedProcessor;
+    private final ChannelStartupState startupState;
 
     TianggeFeedPoller(
-            TianggeFeedProcessor feedProcessor
+            TianggeFeedProcessor feedProcessor,
+            ChannelStartupState startupState
     ) {
 
         this.feedProcessor =
                 feedProcessor;
+
+        this.startupState =
+                startupState;
     }
 
-    /*
-     * Tiangge requires decisions within 60 seconds.
-     *
-     * Polling every 3 seconds gives us plenty of time.
-     */
     @Scheduled(
             fixedDelayString =
-                    "${channel.tiangge.feed-poll-ms:3000}",
+                    "${channel.tiangge.feed-poll-ms:1000}",
             initialDelayString =
-                    "${channel.tiangge.feed-initial-delay-ms:5000}"
+                    "${channel.tiangge.feed-initial-delay-ms:1000}"
     )
     public void poll() {
+
+        /*
+         * Never process marketplace orders before the
+         * initial Inventory snapshot has entered the
+         * ordered stock outbox.
+         */
+        if (!startupState.isReady()) {
+            return;
+        }
 
         feedProcessor.pollOnce();
     }

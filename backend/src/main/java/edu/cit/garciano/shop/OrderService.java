@@ -26,6 +26,7 @@ public class OrderService {
             OrderRepository orderRepository,
             ApplicationEventPublisher eventPublisher
     ) {
+
         this.inventoryService = inventoryService;
         this.orderRepository = orderRepository;
         this.eventPublisher = eventPublisher;
@@ -267,8 +268,8 @@ public class OrderService {
 
         Order order =
                 orderRepository.findById(
-                        orderId
-                )
+                                orderId
+                        )
                         .orElseThrow(
                                 () ->
                                         new OrderNotFoundException(
@@ -451,8 +452,8 @@ public class OrderService {
 
         Order order =
                 orderRepository.findById(
-                        orderId
-                )
+                                orderId
+                        )
                         .orElseThrow(
                                 () ->
                                         new OrderNotFoundException(
@@ -462,8 +463,15 @@ public class OrderService {
                                         )
                         );
 
+        // =====================================================
+        // ALREADY RESOLVED SUCCESSFULLY
+        // =====================================================
+
         /*
-         * Already resolved successfully.
+         * Safe after a restart.
+         *
+         * Inventory was already reserved, so do NOT
+         * reserve anything again.
          */
         if (
                 "CONFIRMED".equals(
@@ -490,6 +498,55 @@ public class OrderService {
                     inventoryService.getAllItems()
             );
         }
+
+        // =====================================================
+        // ALREADY CANCELLED LOCALLY
+        // =====================================================
+
+        /*
+         * LAB 4 RESTART RECOVERY
+         *
+         * Example:
+         *
+         * 1. Local backorder was cancelled.
+         * 2. App stopped before Tiangge received CANCELLED.
+         * 3. channel_orders still says BACKORDERED.
+         *
+         * Return the existing CANCELLED state instead of
+         * throwing "Order is not backordered".
+         *
+         * TianggeBackorderResolver can then safely retry
+         * the CANCELLED resolution.
+         */
+        if (
+                "CANCELLED".equals(
+                        order.getStatus()
+                )
+        ) {
+
+            return new PlaceOrderResponse(
+                    order.getOrderId(),
+                    "CANCELLED",
+                    order.getReason(),
+
+                    order.getItems()
+                            .stream()
+                            .map(
+                                    item ->
+                                            new PlaceOrderResponse.ItemOutcome(
+                                                    item.getProductId(),
+                                                    "NOT_RESERVED"
+                                            )
+                            )
+                            .toList(),
+
+                    inventoryService.getAllItems()
+            );
+        }
+
+        // =====================================================
+        // MUST STILL BE BACKORDERED
+        // =====================================================
 
         if (
                 !"BACKORDERED".equals(
@@ -645,8 +702,8 @@ public class OrderService {
 
         Order order =
                 orderRepository.findById(
-                        orderId
-                )
+                                orderId
+                        )
                         .orElseThrow(
                                 () ->
                                         new OrderNotFoundException(

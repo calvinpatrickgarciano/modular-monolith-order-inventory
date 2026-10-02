@@ -5,6 +5,11 @@ import org.slf4j.LoggerFactory;
 
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+
 @Component
 class TianggeFeedProcessor {
 
@@ -18,13 +23,15 @@ class TianggeFeedProcessor {
     private final TianggeOrderBridge orderBridge;
     private final ChannelOperationContext operationContext;
     private final ChannelStockOutbox stockOutbox;
+    private final ChannelMarketplaceLock marketplaceLock;
 
     TianggeFeedProcessor(
             ChannelGateway channelGateway,
             ChannelStateStore stateStore,
             TianggeOrderBridge orderBridge,
             ChannelOperationContext operationContext,
-            ChannelStockOutbox stockOutbox
+            ChannelStockOutbox stockOutbox,
+            ChannelMarketplaceLock marketplaceLock
     ) {
 
         this.channelGateway =
@@ -41,6 +48,9 @@ class TianggeFeedProcessor {
 
         this.stockOutbox =
                 stockOutbox;
+
+        this.marketplaceLock =
+                marketplaceLock;
     }
 
     void pollOnce() {
@@ -54,8 +64,74 @@ class TianggeFeedProcessor {
                 );
 
         if (batch == null) {
+
             return;
         }
+
+        // =====================================================
+        // FEED BACKLOG PRIORITY
+        // =====================================================
+
+        boolean backlogActive =
+                isFeedBacklog(
+                        batch
+                );
+
+        boolean backlogChanged =
+                marketplaceLock.setFeedBacklogActive(
+                        backlogActive
+                );
+
+        if (backlogChanged) {
+
+            if (backlogActive) {
+
+                log.warn(
+                        "Tiangge feed backlog detected. "
+                                + "Background backorder resolution paused."
+                );
+
+            } else {
+
+                log.info(
+                        "Tiangge feed caught up. "
+                                + "Background backorder resolution allowed again."
+                );
+            }
+        }
+
+        // =====================================================
+        // FEED DIAGNOSTIC
+        // =====================================================
+
+        if (!batch.events().isEmpty()) {
+
+            ChannelGateway.FeedEvent first =
+                    batch.events().get(0);
+
+            ChannelGateway.FeedEvent last =
+                    batch.events().get(
+                            batch.events().size() - 1
+                    );
+
+            log.info(
+                    "Tiangge feed batch: "
+                            + "afterCursor={}, "
+                            + "count={}, "
+                            + "firstSeq={}, "
+                            + "lastSeq={}, "
+                            + "nextCursor={}",
+                    cursor,
+                    batch.events().size(),
+                    first.seq(),
+                    last.seq(),
+                    batch.nextCursor()
+            );
+        }
+
+        // =====================================================
+        // PROCESS EVENTS IN FEED ORDER
+        // =====================================================
 
         for (
                 ChannelGateway.FeedEvent event :
@@ -65,8 +141,7 @@ class TianggeFeedProcessor {
             /*
              * Tiangge delivery is at least once.
              *
-             * eventId, NOT seq, identifies the
-             * logical event.
+             * eventId identifies the logical event.
              */
             if (
                     stateStore.isEventProcessed(
@@ -79,16 +154,16 @@ class TianggeFeedProcessor {
                         event.eventId()
                 );
 
-                /*
-                 * It may have a new sequence number,
-                 * so still move the durable cursor.
-                 */
                 stateStore.advanceCursor(
                         event.seq()
                 );
 
                 continue;
             }
+
+            logDeadline(
+                    event
+            );
 
             boolean success;
 
@@ -114,10 +189,6 @@ class TianggeFeedProcessor {
                                         event.type()
                                 );
 
-                                /*
-                                 * Do not get stuck forever on
-                                 * a future event type.
-                                 */
                                 yield true;
                             }
                         };
@@ -127,7 +198,8 @@ class TianggeFeedProcessor {
                 log.error(
                         "Unable to process event {}: {}",
                         event.eventId(),
-                        exception.getMessage()
+                        exception.getMessage(),
+                        exception
                 );
 
                 success = false;
@@ -135,7 +207,7 @@ class TianggeFeedProcessor {
 
             /*
              * Never move past an event that has not
-             * finished successfully.
+             * completely finished successfully.
              */
             if (!success) {
 
@@ -156,132 +228,337 @@ class TianggeFeedProcessor {
         }
     }
 
-    private boolean processOrderPlaced(
-            ChannelGateway.FeedEvent event
+    // =========================================================
+    // BACKLOG DETECTION
+    // =========================================================
+
+    private boolean isFeedBacklog(
+            ChannelGateway.FeedBatch batch
     ) {
 
-        TianggeOrderBridge.PreparedDecision
-                prepared;
-
         /*
-         * Keep the Tiangge order context active while
-         * the Order transaction commits.
+         * Tiangge feed requests currently ask for at most
+         * 20 events.
          *
-         * InventoryChangedEvent then stores stock as
-         * blocked by this Tiangge order.
+         * Receiving a completely full batch strongly
+         * indicates that additional events are still
+         * waiting behind it.
          */
-        operationContext.begin(
-                event.orderId()
-        );
-
-        try {
-
-            prepared =
-                    orderBridge.prepareOrder(
-                            event
-                    );
-
-        } finally {
-
-            operationContext.clear();
-        }
-
-        /*
-         * Decision may already have reached Tiangge
-         * before a crash.
-         */
-        if (prepared.alreadySent()) {
-
-            stockOutbox.releaseForOrder(
-                    event.orderId()
-            );
+        if (batch.events().size() >= 20) {
 
             return true;
         }
 
-        boolean sent =
-                channelGateway.sendDecision(
-                        event.orderId(),
-                        prepared.decision(),
-                        prepared.shopOrderId()
-                );
-
-        if (!sent) {
-            return false;
-        }
-
-        stateStore.markDecisionSent(
-                event.orderId()
-        );
+        Instant now =
+                Instant.now();
 
         /*
-         * IMPORTANT:
-         *
-         * Tiangge has the decision now.
-         * Only now may the new stock be published.
+         * Even a smaller batch is still backlog when it
+         * contains an event whose deadline has already
+         * expired.
          */
-        stockOutbox.releaseForOrder(
-                event.orderId()
-        );
+        for (
+                ChannelGateway.FeedEvent event :
+                batch.events()
+        ) {
 
-        log.info(
-                "Finished Tiangge order {} -> {}",
-                event.orderId(),
-                prepared.decision()
-        );
+            String deadlineText =
+                    event.deadline();
 
-        return true;
+            if (
+                    deadlineText == null
+                            ||
+                    deadlineText.isBlank()
+            ) {
+
+                continue;
+            }
+
+            try {
+
+                Instant deadline =
+                        OffsetDateTime.parse(
+                                deadlineText
+                        ).toInstant();
+
+                if (!deadline.isAfter(now)) {
+
+                    return true;
+                }
+
+            } catch (
+                    DateTimeParseException exception
+            ) {
+
+                /*
+                 * logDeadline() reports malformed
+                 * deadlines separately.
+                 */
+            }
+        }
+
+        return false;
     }
+
+    // =========================================================
+    // DEADLINE DIAGNOSTIC
+    // =========================================================
+
+    private void logDeadline(
+            ChannelGateway.FeedEvent event
+    ) {
+
+        String deadlineText =
+                event.deadline();
+
+        if (
+                deadlineText == null
+                        ||
+                deadlineText.isBlank()
+        ) {
+
+            log.warn(
+                    "Tiangge event {} has no deadline. "
+                            + "type={}, order={}",
+                    event.eventId(),
+                    event.type(),
+                    event.orderId()
+            );
+
+            return;
+        }
+
+        try {
+
+            Instant deadline =
+                    OffsetDateTime.parse(
+                            deadlineText
+                    ).toInstant();
+
+            Instant now =
+                    Instant.now();
+
+            long remainingMs =
+                    Duration.between(
+                            now,
+                            deadline
+                    ).toMillis();
+
+            if (remainingMs >= 0) {
+
+                log.info(
+                        "Processing Tiangge event {} "
+                                + "type={} order={} seq={} "
+                                + "deadline={} "
+                                + "remainingMs={}",
+                        event.eventId(),
+                        event.type(),
+                        event.orderId(),
+                        event.seq(),
+                        deadlineText,
+                        remainingMs
+                );
+
+            } else {
+
+                log.warn(
+                        "LATE BEFORE PROCESSING: "
+                                + "event={} type={} order={} seq={} "
+                                + "deadline={} "
+                                + "lateByMs={}",
+                        event.eventId(),
+                        event.type(),
+                        event.orderId(),
+                        event.seq(),
+                        deadlineText,
+                        Math.abs(
+                                remainingMs
+                        )
+                );
+            }
+
+        } catch (
+                DateTimeParseException exception
+        ) {
+
+            log.warn(
+                    "Unable to parse Tiangge deadline "
+                            + "for event {}: {}",
+                    event.eventId(),
+                    deadlineText
+            );
+        }
+    }
+
+    // =========================================================
+    // ORDER PLACED
+    // =========================================================
+
+    private boolean processOrderPlaced(
+            ChannelGateway.FeedEvent event
+    ) {
+
+        /*
+         * Feed work receives priority over the background
+         * backorder resolver.
+         */
+        marketplaceLock.lockForFeed();
+
+        try {
+
+            TianggeOrderBridge.PreparedDecision prepared;
+
+            operationContext.begin(
+                    event.orderId()
+            );
+
+            try {
+
+                prepared =
+                        orderBridge.prepareOrder(
+                                event
+                        );
+
+            } finally {
+
+                operationContext.clear();
+            }
+
+            /*
+             * Decision already reached Tiangge during an
+             * earlier delivery of this same order.
+             */
+            if (prepared.alreadySent()) {
+
+                stockOutbox.releaseForOrder(
+                        event.orderId()
+                );
+
+                log.info(
+                        "Finished replayed Tiangge order {} -> {}",
+                        event.orderId(),
+                        prepared.decision()
+                );
+
+                return true;
+            }
+
+            /*
+             * DECISION FIRST.
+             */
+            boolean sent =
+                    channelGateway.sendDecision(
+                            event.orderId(),
+                            prepared.decision(),
+                            prepared.shopOrderId()
+                    );
+
+            if (!sent) {
+
+                log.warn(
+                        "Tiangge decision for {} remains pending",
+                        event.orderId()
+                );
+
+                return false;
+            }
+
+            stateStore.markDecisionSent(
+                    event.orderId()
+            );
+
+            /*
+             * STOCK SECOND.
+             */
+            stockOutbox.releaseForOrder(
+                    event.orderId()
+            );
+
+            log.info(
+                    "Finished Tiangge order {} -> {}",
+                    event.orderId(),
+                    prepared.decision()
+            );
+
+            return true;
+
+        } finally {
+
+            marketplaceLock.unlock();
+        }
+    }
+
+    // =========================================================
+    // CUSTOMER CANCELLATION
+    // =========================================================
 
     private boolean processCancellation(
             ChannelGateway.FeedEvent event
     ) {
 
-        operationContext.begin(
-                event.orderId()
-        );
+        /*
+         * Cancellations are deadline-sensitive too.
+         */
+        marketplaceLock.lockForFeed();
 
         try {
 
-            orderBridge.prepareCancellation(
+            operationContext.begin(
                     event.orderId()
             );
 
-        } finally {
+            try {
 
-            operationContext.clear();
-        }
-
-        /*
-         * Inventory has already been restocked locally,
-         * but the stock events are still blocked.
-         */
-        boolean confirmed =
-                channelGateway.confirmCancellation(
+                orderBridge.prepareCancellation(
                         event.orderId()
                 );
 
-        if (!confirmed) {
-            return false;
+            } finally {
+
+                operationContext.clear();
+            }
+
+            /*
+             * CONFIRMATION FIRST.
+             */
+            boolean confirmed =
+                    channelGateway.confirmCancellation(
+                            event.orderId()
+                    );
+
+            if (!confirmed) {
+
+                log.warn(
+                        "Tiangge cancellation confirmation for {} "
+                                + "remains pending",
+                        event.orderId()
+                );
+
+                return false;
+            }
+
+            stateStore.updateOrderStatus(
+                    event.orderId(),
+                    "CANCELLED_BY_CUSTOMER"
+            );
+
+            /*
+             * STOCK SECOND.
+             */
+            stockOutbox.releaseForOrder(
+                    event.orderId()
+            );
+
+            log.info(
+                    "Finished Tiangge cancellation {}",
+                    event.orderId()
+            );
+
+            return true;
+
+        } finally {
+
+            marketplaceLock.unlock();
         }
-
-        stateStore.updateOrderStatus(
-                event.orderId(),
-                "CANCELLED_BY_CUSTOMER"
-        );
-
-        /*
-         * Confirmation FIRST, stock SECOND.
-         */
-        stockOutbox.releaseForOrder(
-                event.orderId()
-        );
-
-        log.info(
-                "Finished Tiangge cancellation {}",
-                event.orderId()
-        );
-
-        return true;
     }
 }

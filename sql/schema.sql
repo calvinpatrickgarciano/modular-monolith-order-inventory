@@ -26,7 +26,14 @@ CREATE TABLE inventory (
 CREATE TABLE orders (
     order_id BIGSERIAL PRIMARY KEY,
     status VARCHAR(20) NOT NULL
-        CHECK (status IN ('CONFIRMED', 'REJECTED', 'CANCELLED')),
+        CHECK (
+    status IN (
+        'CONFIRMED',
+        'REJECTED',
+        'CANCELLED',
+        'BACKORDERED'
+    )
+)
     reason VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -11,10 +11,7 @@ import java.util.UUID;
 class LegacySupplyGateway implements SupplierGateway {
 
     /*
-     * These are supplier orders that are still considered open.
-     *
-     * CANCELLED, DELIVERED and FAILED are intentionally
-     * not included.
+     * Local statuses considered open for duplicate protection.
      */
     private static final List<SupplierOrderStatus> OPEN_STATUSES =
             List.of(
@@ -23,6 +20,18 @@ class LegacySupplyGateway implements SupplierGateway {
                     SupplierOrderStatus.PICKING,
                     SupplierOrderStatus.SHIPPED,
                     SupplierOrderStatus.UNKNOWN
+            );
+
+    /*
+     * Tiangge BACKORDERED is allowed only when
+     * LegacySupply CURRENTLY reports one of these.
+     */
+    private static final List<SupplierOrderStatus>
+            BACKORDER_ELIGIBLE_STATUSES =
+            List.of(
+                    SupplierOrderStatus.ACCEPTED,
+                    SupplierOrderStatus.PICKING,
+                    SupplierOrderStatus.SHIPPED
             );
 
     private final SupplierOrderRepository supplierOrderRepository;
@@ -63,10 +72,7 @@ class LegacySupplyGateway implements SupplierGateway {
         }
 
         /*
-         * DUPLICATE PROTECTION
-         *
-         * If this product already has an open supplier order,
-         * reuse it instead of creating another purchase order.
+         * Duplicate protection.
          */
         var existingOrder =
                 supplierOrderRepository
@@ -77,11 +83,8 @@ class LegacySupplyGateway implements SupplierGateway {
 
         if (existingOrder.isPresent()) {
 
-            SupplierOrder order =
-                    existingOrder.get();
-
             return toResult(
-                    order,
+                    existingOrder.get(),
                     "An open supplier reorder already exists for "
                             + productId
             );
@@ -101,14 +104,7 @@ class LegacySupplyGateway implements SupplierGateway {
         }
 
         /*
-         * Convert individual units into LegacySupply cases.
-         *
-         * Example:
-         *
-         * unitsNeeded = 13
-         * packSize = 6
-         *
-         * cases = 3
+         * Convert inventory units into supplier cases.
          */
         int cases =
                 (
@@ -118,9 +114,6 @@ class LegacySupplyGateway implements SupplierGateway {
                 )
                         / mapping.packSize();
 
-        /*
-         * LegacySupply allows up to 99 cases.
-         */
         if (cases > 99) {
 
             throw new IllegalArgumentException(
@@ -128,18 +121,12 @@ class LegacySupplyGateway implements SupplierGateway {
             );
         }
 
-        int actualUnitsOrdered =
+        int unitsOrdered =
                 cases
                         * mapping.packSize();
 
         /*
-         * Generate the request ID ONCE.
-         *
-         * It is stored locally and reused across:
-         *
-         * - HTTP retries
-         * - scheduler retries
-         * - application restarts
+         * Generate the idempotency key ONCE.
          */
         String requestId =
                 UUID.randomUUID()
@@ -150,16 +137,13 @@ class LegacySupplyGateway implements SupplierGateway {
                         productId,
                         requestId,
                         cases,
-                        actualUnitsOrdered
+                        unitsOrdered
                 );
 
         try {
 
             /*
-             * Save BEFORE calling LegacySupply.
-             *
-             * This guarantees the reorder exists locally
-             * even if LegacySupply is unavailable.
+             * Persist before talking to LegacySupply.
              */
             supplierOrder =
                     supplierOrderRepository.save(
@@ -169,13 +153,8 @@ class LegacySupplyGateway implements SupplierGateway {
         } catch (DataIntegrityViolationException exception) {
 
             /*
-             * Database-level duplicate protection.
-             *
-             * Two low-stock events might happen almost
-             * simultaneously.
-             *
-             * If the unique open-order index rejects one,
-             * reuse the existing open supplier order.
+             * Another low-stock event may have created
+             * the reorder first.
              */
             var concurrentOrder =
                     supplierOrderRepository
@@ -197,15 +176,7 @@ class LegacySupplyGateway implements SupplierGateway {
         }
 
         /*
-         * BuyerRef must only be created AFTER the local
-         * database generated the supplier order ID.
-         *
-         * This prevents the old RO-null problem.
-         *
-         * Example:
-         *
-         * id = 7
-         * BuyerRef = RO-7
+         * ID now exists, so BuyerRef cannot become RO-null.
          */
         supplierOrder.setBuyerRef(
                 "RO-" + supplierOrder.getId()
@@ -216,19 +187,13 @@ class LegacySupplyGateway implements SupplierGateway {
                         supplierOrder
                 );
 
-        /*
-         * Try immediately.
-         *
-         * If LegacySupply is unavailable, attemptSend()
-         * leaves the order PENDING so the scheduler can retry it.
-         */
         return attemptSend(
                 supplierOrder
         );
     }
 
     // =========================================================
-    // LAB 4 - CHECK IF RESTOCK IS STILL COMING
+    // LAB 4 - IS SUPPLIER STOCK REALLY STILL ON THE WAY?
     // =========================================================
 
     @Override
@@ -236,16 +201,66 @@ class LegacySupplyGateway implements SupplierGateway {
             String productId
     ) {
 
-        return supplierOrderRepository
-                .findFirstByProductIdAndStatusInOrderByCreatedAtDesc(
-                        productId,
-                        OPEN_STATUSES
-                )
-                .isPresent();
+        /*
+         * First find a LOCAL supplier order which appears
+         * eligible for Tiangge backordering.
+         */
+        var existingOrder =
+                supplierOrderRepository
+                        .findFirstByProductIdAndStatusInOrderByCreatedAtDesc(
+                                productId,
+                                BACKORDER_ELIGIBLE_STATUSES
+                        );
+
+        if (existingOrder.isEmpty()) {
+            return false;
+        }
+
+        SupplierOrder supplierOrder =
+                existingOrder.get();
+
+        /*
+         * An acknowledged LegacySupply order must have
+         * a PO number.
+         */
+        if (supplierOrder.getPoNumber() == null) {
+            return false;
+        }
+
+        try {
+
+            /*
+             * CRITICAL LAB 4 FIX:
+             *
+             * Do NOT trust only the local DB status.
+             *
+             * Ask LegacySupply for the CURRENT status
+             * immediately before allowing BACKORDERED.
+             */
+            SupplierOrderStatus currentStatus =
+                    refreshSupplierStatus(
+                            supplierOrder
+                    );
+
+            return BACKORDER_ELIGIBLE_STATUSES.contains(
+                    currentStatus
+            );
+
+        } catch (SupplierUnavailableException exception) {
+
+            /*
+             * We cannot prove that the supplier order is
+             * currently still on the way.
+             *
+             * Be conservative and DO NOT create a new
+             * Tiangge BACKORDERED decision.
+             */
+            return false;
+        }
     }
 
     // =========================================================
-    // SEND SUPPLIER ORDER
+    // SEND PURCHASE ORDER
     // =========================================================
 
     SupplierOrderResult attemptSend(
@@ -253,10 +268,8 @@ class LegacySupplyGateway implements SupplierGateway {
     ) {
 
         /*
-         * If a PO number already exists, LegacySupply already
-         * accepted this local supplier order.
-         *
-         * Never POST it again.
+         * PO number means LegacySupply already accepted it.
+         * Never POST the same local supplier order again.
          */
         if (supplierOrder.getPoNumber() != null) {
 
@@ -290,12 +303,7 @@ class LegacySupplyGateway implements SupplierGateway {
         try {
 
             /*
-             * IMPORTANT:
-             *
-             * The request ID came from the database.
-             *
-             * Every retry therefore reuses the SAME
-             * X-Request-Id.
+             * The persisted requestId is reused across retries.
              */
             LegacyPurchaseOrderAck acknowledgement =
                     legacySupplyClient.placeOrder(
@@ -327,12 +335,7 @@ class LegacySupplyGateway implements SupplierGateway {
         } catch (SupplierUnavailableException exception) {
 
             /*
-             * Temporary supplier failure.
-             *
-             * Do NOT create another supplier order.
-             * Do NOT generate another request ID.
-             *
-             * Keep this exact local row PENDING.
+             * Keep the SAME order pending.
              */
             supplierOrder.setStatus(
                     SupplierOrderStatus.PENDING
@@ -349,9 +352,6 @@ class LegacySupplyGateway implements SupplierGateway {
 
         } catch (RuntimeException exception) {
 
-            /*
-             * Non-temporary application / supplier error.
-             */
             supplierOrder.setStatus(
                     SupplierOrderStatus.FAILED
             );
@@ -368,7 +368,7 @@ class LegacySupplyGateway implements SupplierGateway {
     }
 
     // =========================================================
-    // RETRY PENDING ORDERS
+    // RETRY PENDING PURCHASE ORDERS
     // =========================================================
 
     void retryPendingOrders() {
@@ -383,13 +383,6 @@ class LegacySupplyGateway implements SupplierGateway {
                 pendingOrders
         ) {
 
-            /*
-             * attemptSend() reuses:
-             *
-             * - the same SupplierOrder row
-             * - the same BuyerRef
-             * - the same requestId
-             */
             attemptSend(
                     supplierOrder
             );
@@ -397,7 +390,7 @@ class LegacySupplyGateway implements SupplierGateway {
     }
 
     // =========================================================
-    // TRACK OPEN ORDERS
+    // TRACK SUPPLIER ORDERS
     // =========================================================
 
     void trackOpenOrders() {
@@ -417,67 +410,97 @@ class LegacySupplyGateway implements SupplierGateway {
                 openOrders
         ) {
 
-            /*
-             * An accepted supplier order should have a PO number.
-             */
             if (supplierOrder.getPoNumber() == null) {
                 continue;
             }
 
             try {
 
-                LegacyPurchaseOrderStatus legacyStatus =
-                        legacySupplyClient.getStatus(
-                                supplierOrder.getPoNumber()
-                        );
-
-                SupplierOrderStatus oldStatus =
-                        supplierOrder.getStatus();
-
-                SupplierOrderStatus newStatus =
-                        mapStatus(
-                                legacyStatus.statusCode()
-                        );
-
-                supplierOrder.setStatus(
-                        newStatus
-                );
-
-                supplierOrderRepository.save(
+                /*
+                 * Use the same refresh method as
+                 * hasOpenReorder().
+                 *
+                 * This keeps status handling consistent.
+                 */
+                refreshSupplierStatus(
                         supplierOrder
                 );
-
-                /*
-                 * Only publish the delivery event ONCE,
-                 * when the order transitions to DELIVERED.
-                 */
-                if (
-                        newStatus
-                                == SupplierOrderStatus.DELIVERED
-                                &&
-                        oldStatus
-                                != SupplierOrderStatus.DELIVERED
-                ) {
-
-                    eventPublisher.publishEvent(
-                            new SupplierOrderDeliveredEvent(
-                                    supplierOrder.getId(),
-                                    supplierOrder.getProductId(),
-                                    supplierOrder.getUnits()
-                            )
-                    );
-                }
 
             } catch (SupplierUnavailableException exception) {
 
                 /*
-                 * Tracking temporarily failed.
-                 *
-                 * Keep the current status.
-                 * SupplierScheduler will try again later.
+                 * Temporary LegacySupply problem.
+                 * Scheduler will try again later.
                  */
             }
         }
+    }
+
+    // =========================================================
+    // REFRESH ONE PURCHASE ORDER FROM LEGACYSUPPLY
+    // =========================================================
+
+    /*
+     * synchronized prevents hasOpenReorder() and the normal
+     * tracking scheduler from publishing the same delivery
+     * event at the same time.
+     */
+    private synchronized SupplierOrderStatus refreshSupplierStatus(
+            SupplierOrder supplierOrder
+    ) {
+
+        LegacyPurchaseOrderStatus legacyStatus =
+                legacySupplyClient.getStatus(
+                        supplierOrder.getPoNumber()
+                );
+
+        SupplierOrderStatus oldStatus =
+                supplierOrder.getStatus();
+
+        SupplierOrderStatus newStatus =
+                mapStatus(
+                        legacyStatus.statusCode()
+                );
+
+        /*
+         * Keep our local supplier table synchronized with
+         * LegacySupply's CURRENT status.
+         */
+        if (newStatus != oldStatus) {
+
+            supplierOrder.setStatus(
+                    newStatus
+            );
+
+            supplierOrderRepository.save(
+                    supplierOrder
+            );
+        }
+
+        /*
+         * Delivery event must happen exactly once.
+         *
+         * hasOpenReorder() may discover delivery before
+         * SupplierScheduler does.
+         */
+        if (
+                newStatus
+                        == SupplierOrderStatus.DELIVERED
+                        &&
+                oldStatus
+                        != SupplierOrderStatus.DELIVERED
+        ) {
+
+            eventPublisher.publishEvent(
+                    new SupplierOrderDeliveredEvent(
+                            supplierOrder.getId(),
+                            supplierOrder.getProductId(),
+                            supplierOrder.getUnits()
+                    )
+            );
+        }
+
+        return newStatus;
     }
 
     // =========================================================
@@ -503,19 +526,14 @@ class LegacySupplyGateway implements SupplierGateway {
                     SupplierOrderStatus.DELIVERED;
 
             /*
-             * Discovered during Lab 3:
-             *
-             * StatusCode 90 means the supplier order
-             * was cancelled and the stock will not arrive.
+             * Status 90 was discovered during Lab 3.
+             * No stock will arrive.
              */
             case 90 ->
                     SupplierOrderStatus.CANCELLED;
 
             /*
-             * Any future undocumented LegacySupply status
-             * is kept safe as UNKNOWN.
-             *
-             * UNKNOWN does not restock Inventory.
+             * Never assume an unknown code means delivery.
              */
             default ->
                     SupplierOrderStatus.UNKNOWN;

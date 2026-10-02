@@ -259,17 +259,48 @@ List<ChannelOrderState> findBackorderedOrders() {
 
     return jdbcTemplate.query(
             """
-            SELECT
-                tiangge_order_id,
-                shop_order_id,
-                decision,
-                decision_sent,
-                status
-            FROM channel_orders
-            WHERE
-                decision = 'BACKORDERED'
-                AND status = 'BACKORDERED'
-            ORDER BY created_at
+                SELECT
+                    co.tiangge_order_id,
+                    co.shop_order_id,
+                    co.decision,
+                    co.decision_sent,
+                    co.status
+                FROM channel_orders co
+                WHERE
+                    co.decision = 'BACKORDERED'
+                    AND co.status = 'BACKORDERED'
+
+                ORDER BY
+
+                    /*
+                     * Highest priority:
+                     *
+                     * Backorders that are currently blocking
+                     * one or more unsent stock updates.
+                     *
+                     * These must be resolved first because an
+                     * old blocked row can prevent every newer
+                     * stock update for the same SKU from being
+                     * published.
+                     */
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM channel_stock_updates csu
+                            WHERE
+                                csu.sent = FALSE
+                                AND csu.blocked_by_order_id =
+                                    co.tiangge_order_id
+                        )
+                        THEN 0
+                        ELSE 1
+                    END,
+
+                    /*
+                     * Within the same priority group, keep
+                     * oldest-first processing.
+                     */
+                    co.created_at
             """,
 
             (resultSet, rowNumber) ->
@@ -336,44 +367,69 @@ List<ChannelOrderState> findBackorderedOrders() {
         return id;
     }
 
-    List<StockUpdateState>
-    findReadyStockUpdates() {
+    Optional<StockUpdateState> findOldestUnsentStockUpdate(
+        String sellerSku
+) {
 
-        return jdbcTemplate.query(
-                """
-                SELECT
-                    id,
-                    seller_sku,
-                    available,
-                    blocked_by_order_id
+    List<StockUpdateState> rows =
+            jdbcTemplate.query(
+                    """
+                    SELECT
+                        id,
+                        seller_sku,
+                        available,
+                        blocked_by_order_id
+                    FROM channel_stock_updates
+                    WHERE
+                        seller_sku = ?
+                        AND sent = FALSE
+                    ORDER BY id
+                    LIMIT 1
+                    """,
+
+                    (resultSet, rowNumber) ->
+                            new StockUpdateState(
+                                    resultSet.getLong(
+                                            "id"
+                                    ),
+
+                                    resultSet.getString(
+                                            "seller_sku"
+                                    ),
+
+                                    resultSet.getInt(
+                                            "available"
+                                    ),
+
+                                    resultSet.getString(
+                                            "blocked_by_order_id"
+                                    )
+                            ),
+
+                    sellerSku
+            );
+
+    return rows
+            .stream()
+            .findFirst();
+}
+List<String> findBlockedSkus(
+        String tianggeOrderId
+) {
+
+    return jdbcTemplate.queryForList(
+            """
+                SELECT DISTINCT seller_sku
                 FROM channel_stock_updates
                 WHERE
                     sent = FALSE
-                    AND blocked_by_order_id IS NULL
-                ORDER BY id
-                """,
-
-                (resultSet, rowNumber) ->
-                        new StockUpdateState(
-                                resultSet.getLong(
-                                        "id"
-                                ),
-
-                                resultSet.getString(
-                                        "seller_sku"
-                                ),
-
-                                resultSet.getInt(
-                                        "available"
-                                ),
-
-                                resultSet.getString(
-                                        "blocked_by_order_id"
-                                )
-                        )
-        );
-    }
-
+                    AND blocked_by_order_id = ?
+                ORDER BY seller_sku
+            """,
+            String.class,
+            tianggeOrderId
+    );
+}
     void unblockStockUpdates(
             String tianggeOrderId
     ) {
